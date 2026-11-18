@@ -1,0 +1,227 @@
+import { createServerFn } from "@tanstack/react-start";
+import { queryOptions } from "@tanstack/react-query";
+import { z } from "zod";
+import { normalizeDriver, type Driver } from "./drivers";
+import { DEFAULT_SETTINGS, type AppSettings, type PaidPlanId } from "./rules";
+
+const SHEET_URL =
+  "https://script.google.com/macros/s/AKfycbzordMM3iS-v2TTT0-vnppRaK-OVhwJ9LKymiXXXrQdJpAAswkKhYYuf8tuK15PrBuI/exec";
+
+export const getDrivers = createServerFn({ method: "GET" }).handler(
+  async (): Promise<{ drivers: Driver[]; error: string | null }> => {
+    try {
+      const res = await fetch(`${SHEET_URL}?action=getDrivers`, { redirect: "follow" });
+      const text = await res.text();
+      if (!res.ok) {
+        console.error(`Sheet read failed [${res.status}]: ${text.slice(0, 300)}`);
+        return { drivers: [], error: "Couldn't reach the driver list right now." };
+      }
+      const json: unknown = JSON.parse(text);
+      const rows = Array.isArray(json)
+        ? json
+        : json && typeof json === "object" && Array.isArray((json as { data?: unknown }).data)
+          ? ((json as { data: unknown[] }).data)
+          : [];
+      const drivers = rows
+        .map((r, i) =>
+          r && typeof r === "object" ? normalizeDriver(r as Record<string, unknown>, i) : null,
+        )
+        .filter((d): d is Driver => d !== null);
+      return { drivers, error: null };
+    } catch (e) {
+      console.error("Sheet read error", e);
+      return { drivers: [], error: "Couldn't reach the driver list right now." };
+    }
+  },
+);
+
+export const driversQuery = queryOptions({
+  queryKey: ["drivers"],
+  queryFn: () => getDrivers(),
+  staleTime: 60_000,
+});
+
+const phone = z.string().regex(/^\d{10,12}$/);
+const photo = z.string().max(80_000).optional();
+
+const actionSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("registerDriver"),
+    Driver_Name: z.string().trim().min(2).max(80),
+    Category: z.string().max(40),
+    Phone: phone,
+    Alternate_Phone: phone.or(z.literal("")),
+    WhatsApp: phone,
+    Address: z.string().trim().min(5).max(300),
+    Photo_URL: photo,
+    Status: z.string().max(20),
+  }),
+  z.object({
+    action: z.literal("updateProfile"),
+    Name: z.string().trim().min(2).max(80),
+    Contact: phone,
+    Login_Mobile: phone,
+    Photo_URL: photo,
+  }),
+  z.object({
+    action: z.literal("updateStatus"),
+    Phone: phone,
+    Status: z.enum(["Online", "Offline"]),
+  }),
+  z.object({
+    action: z.literal("rateDriver"),
+    Phone: phone,
+    Rating: z.number().int().min(1).max(5),
+    Rated_By: phone,
+  }),
+]);
+
+export type SheetAction = z.infer<typeof actionSchema>;
+
+export const submitToSheet = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => actionSchema.parse(input))
+  .handler(async ({ data }): Promise<{ ok: boolean; reason: string | null }> => {
+    try {
+      const res = await fetch(SHEET_URL, {
+        method: "POST",
+        redirect: "follow",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ ...data, Timestamp: new Date().toISOString() }),
+      });
+      const text = await res.text();
+      if (text.includes("Script function not found: doPost")) {
+        return { ok: false, reason: "not_configured" };
+      }
+      if (!res.ok) {
+        console.error(`Sheet write failed [${res.status}]: ${text.slice(0, 300)}`);
+        return { ok: false, reason: "failed" };
+      }
+      try {
+        const json = JSON.parse(text) as { ok?: boolean; success?: boolean; status?: string };
+        const ok = json.ok ?? json.success ?? json.status !== "error";
+        return { ok: Boolean(ok), reason: ok ? null : "failed" };
+      } catch {
+        return { ok: true, reason: null };
+      }
+    } catch (e) {
+      console.error("Sheet write error", e);
+      return { ok: false, reason: "failed" };
+    }
+  });
+
+// ---------- Owner settings (plan prices, trial visibility) & driver trial ----------
+
+async function postSheet(body: Record<string, unknown>): Promise<{ json: Record<string, unknown> | null; reason: string | null }> {
+  try {
+    const res = await fetch(SHEET_URL, {
+      method: "POST",
+      redirect: "follow",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ ...body, Timestamp: new Date().toISOString() }),
+    });
+    const text = await res.text();
+    if (text.includes("Script function not found: doPost")) return { json: null, reason: "not_configured" };
+    if (!res.ok) {
+      console.error(`Sheet request failed [${res.status}]: ${text.slice(0, 300)}`);
+      return { json: null, reason: "failed" };
+    }
+    try {
+      const json = JSON.parse(text) as Record<string, unknown>;
+      if (json.ok === false && String(json.error ?? "").includes("Unknown action")) {
+        return { json: null, reason: "not_configured" };
+      }
+      return { json, reason: null };
+    } catch {
+      return { json: null, reason: "not_configured" };
+    }
+  } catch (e) {
+    console.error("Sheet request error", e);
+    return { json: null, reason: "failed" };
+  }
+}
+
+function readSettings(raw: unknown): AppSettings {
+  const s = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const price = (k: PaidPlanId) => {
+    const n = Number(s[`price_${k}`]);
+    return Number.isFinite(n) && n >= 0 && String(s[`price_${k}`] ?? "") !== "" ? Math.round(n) : DEFAULT_SETTINGS.prices[k];
+  };
+  const until = s.trialVisibleUntil;
+  return {
+    prices: { monthly: price("monthly"), quarterly: price("quarterly"), yearly: price("yearly") },
+    trialVisibleUntil:
+      until === "" || until === "hidden"
+        ? null
+        : typeof until === "string" && !Number.isNaN(Date.parse(until))
+          ? new Date(until).toISOString()
+          : DEFAULT_SETTINGS.trialVisibleUntil,
+  };
+}
+
+export const getSettings = createServerFn({ method: "GET" }).handler(
+  async (): Promise<{ settings: AppSettings; synced: boolean }> => {
+    const { json } = await postSheet({ action: "getSettings" });
+    if (!json || !json.settings) return { settings: DEFAULT_SETTINGS, synced: false };
+    return { settings: readSettings(json.settings), synced: true };
+  },
+);
+
+export const settingsQuery = queryOptions({
+  queryKey: ["settings"],
+  queryFn: () => getSettings(),
+  staleTime: 60_000,
+});
+
+function pinMatches(pin: string): boolean {
+  const expected = process.env.ADMIN_PIN ?? "";
+  if (!expected || pin.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < pin.length; i++) diff |= pin.charCodeAt(i) ^ expected.charCodeAt(i);
+  return diff === 0;
+}
+
+const pinSchema = z.string().min(4).max(64);
+
+export const verifyAdmin = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => z.object({ pin: pinSchema }).parse(input))
+  .handler(async ({ data }): Promise<{ ok: boolean; reason: string | null }> => {
+    if (!process.env.ADMIN_PIN) return { ok: false, reason: "no_pin" };
+    return pinMatches(data.pin) ? { ok: true, reason: null } : { ok: false, reason: "wrong_pin" };
+  });
+
+const priceSchema = z.number().int().min(0).max(100000);
+
+export const saveSettings = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        pin: pinSchema,
+        prices: z.object({ monthly: priceSchema, quarterly: priceSchema, yearly: priceSchema }),
+        trialVisibleUntil: z.string().datetime().nullable(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data }): Promise<{ ok: boolean; reason: string | null }> => {
+    if (!process.env.ADMIN_PIN) return { ok: false, reason: "no_pin" };
+    if (!pinMatches(data.pin)) return { ok: false, reason: "wrong_pin" };
+    const { json, reason } = await postSheet({
+      action: "saveSettings",
+      settings: {
+        price_monthly: data.prices.monthly,
+        price_quarterly: data.prices.quarterly,
+        price_yearly: data.prices.yearly,
+        trialVisibleUntil: data.trialVisibleUntil ?? "hidden",
+      },
+    });
+    if (!json) return { ok: false, reason };
+    return json.ok === false ? { ok: false, reason: "failed" } : { ok: true, reason: null };
+  });
+
+/** Records the trial against the mobile number in the sheet; refuses a number that already used it. */
+export const claimTrial = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => z.object({ Phone: phone }).parse(input))
+  .handler(async ({ data }): Promise<{ alreadyUsed: boolean; synced: boolean }> => {
+    const { json } = await postSheet({ action: "claimTrial", Phone: data.Phone });
+    if (!json) return { alreadyUsed: false, synced: false };
+    return { alreadyUsed: json.alreadyUsed === true, synced: true };
+  });
