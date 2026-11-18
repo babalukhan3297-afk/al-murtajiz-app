@@ -1,0 +1,81 @@
+import { Link, useRouterState } from "@tanstack/react-router";
+import { Bell, Home, UserRound } from "lucide-react";
+import type { ReactNode } from "react";
+import { cn } from "@/lib/utils";
+import { useAppState } from "@/lib/session";
+import { buildNotifications, urgentCount } from "@/lib/notifications";
+
+export function MobileShell({
+  children,
+  nav = true,
+  className,
+}: {
+  children: ReactNode;
+  nav?: boolean;
+  className?: string;
+}) {
+  return (
+    <div className="min-h-dvh bg-muted/60">
+      <div
+        className={cn(
+          "relative mx-auto flex min-h-dvh w-full max-w-md flex-col bg-background",
+          nav && "pb-24",
+          className,
+        )}
+      >
+        {children}
+        {nav && <BottomNav />}
+      </div>
+    </div>
+  );
+}
+
+const items = [
+  { to: "/home", label: "Home", icon: Home },
+  { to: "/notifications", label: "Notification", icon: Bell },
+  { to: "/profile", label: "Profile", icon: UserRound },
+] as const;
+
+function BottomNav() {
+  const path = useRouterState({ select: (s) => s.location.pathname });
+  const app = useAppState();
+  const urgent = urgentCount(buildNotifications(app.session ? app.accounts[app.session.mobile] : undefined));
+  return (
+    <nav className="fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-md px-4 pb-[max(env(safe-area-inset-bottom),12px)]">
+      <div className="flex items-center justify-around rounded-3xl border bg-card/95 p-1.5 shadow-lift backdrop-blur">
+        {items.map((it) => {
+          const active = path.startsWith(it.to);
+          const Icon = it.icon;
+          return (
+            <Link
+              key={it.label}
+              to={it.to}
+              className={cn(
+                "flex flex-1 flex-col items-center gap-0.5 rounded-2xl py-2 text-[11px] font-semibold transition-colors",
+                active ? "bg-primary text-primary-foreground" : "text-muted-foreground",
+              )}
+            >
+              <span className="relative">
+                <Icon className="size-5" />
+                {it.to === "/notifications" && urgent > 0 && (
+                  <span className="absolute -right-2 -top-1.5 flex size-4 items-center justify-center rounded-full bg-destructive text-[9px] font-bold text-destructive-foreground">
+                    {urgent}
+                  </span>
+                )}
+              </span>
+              {it.label}
+            </Link>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
+export function ScreenLoading() {
+  return (
+    <div className="flex flex-1 items-center justify-center p-10">
+      <div className="size-10 animate-spin rounded-full border-4 border-secondary border-t-primary" />
+    </div>
+  );
+}
