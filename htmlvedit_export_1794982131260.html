@@ -1,0 +1,149 @@
+import { useState } from "react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { PhotoPicker } from "./PhotoPicker";
+import { CATEGORIES, normalizeMobile } from "@/lib/rules";
+import { updateAccount, type DriverProfile } from "@/lib/session";
+import { useSheetSubmit } from "@/lib/useSheet";
+import { cn } from "@/lib/utils";
+
+export function DriverRegistrationForm({
+  mobile,
+  initial,
+  onDone,
+}: {
+  mobile: string;
+  initial: DriverProfile | undefined;
+  onDone: () => void;
+}) {
+  const submit = useSheetSubmit();
+  const [busy, setBusy] = useState(false);
+  const [f, setF] = useState<DriverProfile>(
+    initial ?? {
+      name: "",
+      address: "",
+      contact: mobile,
+      altContact: "",
+      whatsapp: mobile,
+      category: CATEGORIES[0].name,
+    },
+  );
+  const set = (k: keyof DriverProfile) => (v: string) => setF((p) => ({ ...p, [k]: v }));
+
+  async function onSubmit(e: React.FormEvent): Promise<void> {
+    e.preventDefault();
+    const contact = normalizeMobile(f.contact);
+    const whatsapp = normalizeMobile(f.whatsapp);
+    const alt = f.altContact ? normalizeMobile(f.altContact) : "";
+    if (!f.photo) return void toast.error("Please upload your driver photo.");
+    if (f.name.trim().length < 2) return void toast.error("Enter your full name.");
+    if (f.address.trim().length < 5) return void toast.error("Enter your full address.");
+    if (!contact) return void toast.error("Enter a valid contact number.");
+    if (alt === null) return void toast.error("Enter a valid alternate mobile number.");
+    if (!whatsapp) return void toast.error("Enter a valid WhatsApp number.");
+    const clean: DriverProfile = { ...f, name: f.name.trim(), address: f.address.trim(), contact, whatsapp, altContact: alt };
+    setBusy(true);
+    updateAccount(mobile, (a) => ({ ...a, driver: clean, duty: a.duty ?? true }));
+    await submit(
+      {
+        action: "registerDriver",
+        Driver_Name: clean.name,
+        Category: clean.category,
+        Phone: `91${contact}`,
+        Alternate_Phone: alt ? `91${alt}` : "",
+        WhatsApp: `91${whatsapp}`,
+        Address: clean.address,
+        Photo_URL: clean.photo,
+        Status: "Online",
+      },
+      "Driver registration submitted",
+    );
+    setBusy(false);
+    onDone();
+  }
+
+  return (
+    <form onSubmit={onSubmit} className="space-y-4 rounded-3xl border bg-card p-5 shadow-soft">
+      <div>
+        <h2 className="font-display text-xl font-bold">Driver Registration</h2>
+        <p className="text-sm text-muted-foreground">Fill your details to start receiving rides.</p>
+      </div>
+      <PhotoPicker
+        value={f.photo}
+        onChange={set("photo")}
+        label="Upload Driver Photo"
+        hint="JPG or PNG — any size"
+      />
+      <Field label="Full Name" id="d-name">
+        <Input id="d-name" value={f.name} onChange={(e) => set("name")(e.target.value)} placeholder="e.g. Arshad Khan" className="h-12 rounded-xl" />
+      </Field>
+      <Field label="Vehicle Type" id="d-cat">
+        <div id="d-cat" className="grid grid-cols-2 gap-2">
+          {CATEGORIES.map((c) => (
+            <button
+              key={c.slug}
+              type="button"
+              onClick={() => set("category")(c.name)}
+              className={cn(
+                "rounded-xl border px-3 py-2.5 text-sm font-semibold transition-colors",
+                f.category === c.name ? "border-primary bg-primary text-primary-foreground" : "bg-background",
+              )}
+            >
+              {c.name}
+            </button>
+          ))}
+        </div>
+      </Field>
+      <Field label="Full Address" id="d-addr">
+        <Textarea id="d-addr" value={f.address} onChange={(e) => set("address")(e.target.value)} placeholder="House no., street, area, Shirpur" className="min-h-20 rounded-xl" />
+      </Field>
+      <PhoneField label="Contact Number" id="d-phone" value={f.contact} onChange={set("contact")} />
+      <PhoneField label="Alternate Mobile Number" id="d-alt" value={f.altContact} onChange={set("altContact")} />
+      <PhoneField label="WhatsApp Number" id="d-wa" value={f.whatsapp} onChange={set("whatsapp")} />
+      <Button type="submit" variant="brand" size="xl" className="w-full" disabled={busy}>
+        {busy ? "Submitting…" : "Submit Form"}
+      </Button>
+    </form>
+  );
+}
+
+export function Field({ label, id, children }: { label: string; id: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id} className="text-sm font-semibold">{label}</Label>
+      {children}
+    </div>
+  );
+}
+
+export function PhoneField({
+  label,
+  id,
+  value,
+  onChange,
+}: {
+  label: string;
+  id: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <Field label={label} id={id}>
+      <div className="flex h-12 items-center rounded-xl border bg-background px-3 focus-within:ring-2 focus-within:ring-ring">
+        <span className="text-sm font-semibold text-muted-foreground">+91</span>
+        <input
+          id={id}
+          inputMode="numeric"
+          maxLength={10}
+          value={value}
+          onChange={(e) => onChange(e.target.value.replace(/\D/g, ""))}
+          className="ml-2 h-full w-full bg-transparent font-semibold outline-none"
+          placeholder="10-digit number"
+        />
+      </div>
+    </Field>
+  );
+}
