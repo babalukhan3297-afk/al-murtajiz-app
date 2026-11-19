@@ -1,0 +1,1010 @@
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useMemo, useState } from "react";
+import {
+  Activity,
+  Ban,
+  CheckCircle2,
+  ChevronRight,
+  CreditCard,
+  Crown,
+  EyeOff,
+  Fingerprint,
+  IndianRupee,
+  KeyRound,
+  LayoutDashboard,
+  Lock,
+  LogOut,
+  MapPin,
+  Phone,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  Sparkles,
+  UserCog,
+  UserRound,
+  Users,
+  XCircle,
+} from "lucide-react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { MobileShell, ScreenLoading } from "@/components/app/MobileShell";
+import { DriverAvatar } from "@/components/app/DriverAvatar";
+import { hashPassword, signOut, updateAccount, useRequireSession } from "@/lib/session";
+import { biometricAvailable, registerBiometric } from "@/lib/biometric";
+import { cn } from "@/lib/utils";
+
+export const Route = createFileRoute("/profile")({
+  head: () => ({
+    meta: [
+      { title: "My Profile — AL MURTAJIZ" },
+      { name: "description", content: "Set your name, photo and contact number for AL MURTAJIZ rides." },
+      { property: "og:title", content: "My Profile — AL MURTAJIZ" },
+      { property: "og:description", content: "Set your name, photo and contact number for AL MURTAJIZ rides." },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
+    ],
+  }),
+  component: ProfileScreen,
+});
+
+type Phase1Tab = 1 | 2 | 3 | 4 | 5;
+
+interface AdminDriverRecord {
+  id: string;
+  name: string;
+  mobile: string;
+  address: string;
+  photo?: string;
+  status: "pending" | "approved" | "rejected" | "blocked";
+  planName: string;
+  planStatus: "active" | "expired" | "trial" | "none";
+  expiresOn?: string;
+}
+
+interface AdminPaymentRecord {
+  id: string;
+  driverName: string;
+  mobile: string;
+  planName: string;
+  amount: number;
+  status: "success" | "pending" | "failed" | "refunded";
+  date: string;
+}
+
+interface PlanPricingConfig {
+  trialEnabled: boolean;
+  trialDays: number;
+  monthlyPrice: number;
+  monthlyDays: number;
+  quarterlyPrice: number;
+  quarterlyDays: number;
+  yearlyPrice: number;
+  yearlyDays: number;
+}
+
+const INITIAL_DRIVERS: AdminDriverRecord[] = [
+  {
+    id: "DRV-101",
+    name: "Salman Khan",
+    mobile: "9823000001",
+    address: "Main Road, Near Bus Stand, Shirpur, Dist. Dhule 425405",
+    status: "approved",
+    planName: "Quarterly Plan",
+    planStatus: "active",
+    expiresOn: "2027-02-15",
+  },
+  {
+    id: "DRV-102",
+    name: "Arsalan Pathan",
+    mobile: "9823000002",
+    address: "Karvand Naka, Shirpur, Dist. Dhule 425405",
+    status: "pending",
+    planName: "Monthly Plan",
+    planStatus: "none",
+  },
+  {
+    id: "DRV-103",
+    name: "Azeem Shaikh",
+    mobile: "9823000003",
+    address: "Thalner Road, Shirpur, Dist. Dhule 425405",
+    status: "approved",
+    planName: "Monthly Plan",
+    planStatus: "expired",
+    expiresOn: "2026-11-01",
+  },
+];
+
+const INITIAL_PAYMENTS: AdminPaymentRecord[] = [
+  {
+    id: "PAY-5001",
+    driverName: "Salman Khan",
+    mobile: "9823000001",
+    planName: "Quarterly Plan",
+    amount: 249,
+    status: "success",
+    date: "2026-11-15",
+  },
+  {
+    id: "PAY-5002",
+    driverName: "Azeem Shaikh",
+    mobile: "9823000003",
+    planName: "Monthly Plan",
+    amount: 99,
+    status: "refunded",
+    date: "2026-10-02",
+  },
+  {
+    id: "PAY-5003",
+    driverName: "Arsalan Pathan",
+    mobile: "9823000002",
+    planName: "Monthly Plan",
+    amount: 99,
+    status: "failed",
+    date: "2026-11-18",
+  },
+];
+
+const INITIAL_PRICING: PlanPricingConfig = {
+  trialEnabled: true,
+  trialDays: 30,
+  monthlyPrice: 99,
+  monthlyDays: 30,
+  quarterlyPrice: 249,
+  quarterlyDays: 90,
+  yearlyPrice: 799,
+  yearlyDays: 365,
+};
+
+function ProfileScreen() {
+  const { ready, session, account } = useRequireSession();
+  const navigate = useNavigate();
+  const [password, setPassword] = useState("");
+  const [bioOk, setBioOk] = useState(false);
+
+  // Owner settings security lock & unlocked state
+  const [showAdminLockModal, setShowAdminLockModal] = useState(false);
+  const [adminPasswordInput, setAdminPasswordInput] = useState("");
+  const [isOwnerUnlocked, setIsOwnerUnlocked] = useState(false);
+
+  // Phase 1 Admin Panel State
+  const [activeTab, setActiveTab] = useState<Phase1Tab>(1);
+  const [drivers, setDrivers] = useState<AdminDriverRecord[]>(INITIAL_DRIVERS);
+  const [payments, setPayments] = useState<AdminPaymentRecord[]>(INITIAL_PAYMENTS);
+  const [pricing, setPricing] = useState<PlanPricingConfig>(INITIAL_PRICING);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [paymentFilter, setPaymentFilter] = useState<"all" | "success" | "pending" | "failed" | "refunded">("all");
+
+  // Trial plan completion state -> automatically hides trial from Premium Plans section once completed
+  const [trialCompleted, setTrialCompleted] = useState(false);
+  const [selectedPlanPreview, setSelectedPlanPreview] = useState<string>("trial");
+
+  useEffect(() => {
+    biometricAvailable().then(setBioOk);
+  }, []);
+
+  // Automatically hide Trial Plan in Premium Plans section once trial is completed/expired or disabled
+  const showTrialInPremiumSection = pricing.trialEnabled && pricing.trialDays > 0 && !trialCompleted;
+
+  useEffect(() => {
+    if (!showTrialInPremiumSection && selectedPlanPreview === "trial") {
+      setSelectedPlanPreview("monthly");
+    }
+  }, [showTrialInPremiumSection, selectedPlanPreview]);
+
+  const stats = useMemo(() => {
+    const totalDrivers = drivers.length;
+    const activeMembers = drivers.filter((d) => d.status === "approved" && d.planStatus !== "none").length;
+    const premiumMembers = drivers.filter((d) => d.status === "approved" && d.planStatus === "active").length;
+    const totalPayment = payments
+      .filter((p) => p.status === "success")
+      .reduce((sum, item) => sum + item.amount, 0);
+
+    return { totalDrivers, activeMembers, premiumMembers, totalPayment };
+  }, [drivers, payments]);
+
+  const filteredDrivers = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return drivers;
+    return drivers.filter(
+      (d) =>
+        d.name.toLowerCase().includes(q) ||
+        d.mobile.includes(q) ||
+        d.address.toLowerCase().includes(q),
+    );
+  }, [drivers, searchQuery]);
+
+  const filteredPayments = useMemo(() => {
+    if (paymentFilter === "all") return payments;
+    return payments.filter((p) => p.status === paymentFilter);
+  }, [payments, paymentFilter]);
+
+  if (!ready || !session || !account) {
+    return (
+      <MobileShell>
+        <ScreenLoading />
+      </MobileShell>
+    );
+  }
+
+  async function savePassword(): Promise<void> {
+    if (!session) return;
+    if (password.length < 6) return void toast.error("Use at least 6 characters.");
+    const h = await hashPassword(session.mobile, password);
+    updateAccount(session.mobile, (a) => ({ ...a, passwordHash: h }));
+    setPassword("");
+    toast.success("Password set — you can now log in with it.");
+  }
+
+  async function toggleBio(on: boolean): Promise<void> {
+    if (!session) return;
+    if (!on) {
+      updateAccount(session.mobile, (a) => ({ ...a, credentialId: undefined }));
+      return void toast.message("Fingerprint login turned off");
+    }
+    try {
+      const id = await registerBiometric(session.mobile);
+      updateAccount(session.mobile, (a) => ({ ...a, credentialId: id }));
+      toast.success("Fingerprint login is on");
+    } catch {
+      toast.error("Couldn't set up fingerprint on this device.");
+    }
+  }
+
+  async function handleAdminAccess(e: React.FormEvent) {
+    e.preventDefault();
+    if (!session || !account) return;
+    if (adminPasswordInput.length < 4) {
+      toast.error("Enter valid owner password.");
+      return;
+    }
+
+    if (account.passwordHash) {
+      const enteredHash = await hashPassword(session.mobile, adminPasswordInput);
+      if (enteredHash !== account.passwordHash) {
+        toast.error("Incorrect password. Please enter your account password.");
+        return;
+      }
+    }
+
+    setShowAdminLockModal(false);
+    setAdminPasswordInput("");
+    setIsOwnerUnlocked(true);
+    toast.success("Owner Admin Panel Unlocked!");
+  }
+
+  async function triggerOwnerBiometric() {
+    if (!session) return;
+    if (!bioOk) {
+      toast.error("Fingerprint sensor not available on this device.");
+      return;
+    }
+    try {
+      await registerBiometric(session.mobile);
+      toast.success("Fingerprint verified! Owner Admin Panel Unlocked.");
+      setShowAdminLockModal(false);
+      setIsOwnerUnlocked(true);
+    } catch {
+      toast.error("Fingerprint authentication failed.");
+    }
+  }
+
+  function handleDriverAction(driverId: string, nextStatus: "approved" | "rejected" | "blocked") {
+    setDrivers((prev) => prev.map((d) => (d.id === driverId ? { ...d, status: nextStatus } : d)));
+    if (nextStatus === "approved") toast.success("Driver approved successfully.");
+    if (nextStatus === "rejected") toast.success("Driver request rejected.");
+    if (nextStatus === "blocked") toast.success("Driver blocked successfully.");
+  }
+
+  function handlePricingSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (
+      pricing.trialDays <= 0 ||
+      pricing.monthlyPrice <= 0 ||
+      pricing.quarterlyPrice <= 0 ||
+      pricing.yearlyPrice <= 0 ||
+      pricing.monthlyDays <= 0 ||
+      pricing.quarterlyDays <= 0 ||
+      pricing.yearlyDays <= 0
+    ) {
+      toast.error("Price aur validity days 0 se zyada hone chahiye.");
+      return;
+    }
+    toast.success("Trial aur Premium plans ki settings save ho gayi.");
+  }
+
+  function handlePaymentAction(paymentId: string, nextStatus: "success" | "refunded") {
+    setPayments((prev) => prev.map((p) => (p.id === paymentId ? { ...p, status: nextStatus } : p)));
+    if (nextStatus === "success") {
+      const targetPayment = payments.find((p) => p.id === paymentId);
+      if (targetPayment) {
+        setDrivers((prev) =>
+          prev.map((d) =>
+            d.mobile === targetPayment.mobile
+              ? { ...d, status: "approved", planName: targetPayment.planName, planStatus: "active" }
+              : d,
+          ),
+        );
+      }
+      toast.success("Payment marked as Successful & Plan Activated.");
+    } else {
+      toast.success("Payment marked as Refunded.");
+    }
+  }
+
+  const phase1Menu: Array<{ id: Phase1Tab; label: string; icon: React.ReactNode }> = [
+    { id: 1, label: "1. Dashboard", icon: <LayoutDashboard className="size-4" /> },
+    { id: 2, label: "2. Manage Drivers", icon: <Users className="size-4" /> },
+    { id: 3, label: "3. Premium Plans", icon: <Crown className="size-4" /> },
+    { id: 4, label: "4. Payment Management", icon: <CreditCard className="size-4" /> },
+    { id: 5, label: "5. Manage Subscriptions", icon: <RefreshCw className="size-4" /> },
+  ];
+
+  return (
+    <MobileShell>
+      <header className="px-5 pb-2 pt-8">
+        <h1 className="font-display text-3xl font-bold">My Profile</h1>
+        <p className="text-sm text-muted-foreground">
+          +91 {session.mobile} · {session.role === "driver" ? "Driver" : "Passenger"}
+        </p>
+      </header>
+
+      <main className="space-y-5 px-4 pb-24 pt-3">
+        <Link to="/home" className="flex items-center gap-3 rounded-3xl border bg-card p-4 shadow-soft">
+          {account.profile ? (
+            <DriverAvatar name={account.profile.name} photo={account.profile.photo} className="size-12" />
+          ) : (
+            <div className="flex size-12 items-center justify-center rounded-2xl bg-secondary text-secondary-foreground">
+              <UserRound className="size-6" />
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <p className="truncate font-semibold">{account.profile?.name ?? "Passenger Form"}</p>
+            <p className="text-xs text-muted-foreground">Edit your details in Home → Passenger</p>
+          </div>
+          <ChevronRight className="size-5 text-muted-foreground" />
+        </Link>
+
+        <section className="space-y-4 rounded-3xl border bg-card p-5 shadow-soft">
+          <h2 className="flex items-center gap-2 font-display text-lg font-bold">
+            <ShieldCheck className="size-5 text-primary" /> Login & Security
+          </h2>
+          <div className="space-y-2">
+            <p className="text-sm font-semibold">{account.passwordHash ? "Change password" : "Set a password"}</p>
+            <div className="flex gap-2">
+              <Input
+                type="password"
+                autoComplete="new-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="At least 6 characters"
+                className="h-11 rounded-xl"
+              />
+              <Button type="button" variant="soft" className="h-11 rounded-xl" onClick={savePassword}>
+                <KeyRound /> Save
+              </Button>
+            </div>
+          </div>
+          <div className="flex items-center justify-between gap-3 rounded-2xl bg-muted p-3.5">
+            <div className="flex items-center gap-3">
+              <Fingerprint className="size-6 text-primary" />
+              <div>
+                <p className="text-sm font-semibold">Fingerprint login</p>
+                <p className="text-xs text-muted-foreground">
+                  {bioOk ? "Use your phone's sensor next time" : "Not available on this device"}
+                </p>
+              </div>
+            </div>
+            <Switch
+              checked={!!account.credentialId}
+              onCheckedChange={toggleBio}
+              disabled={!bioOk}
+              aria-label="Fingerprint login"
+            />
+          </div>
+          <Button
+            variant="outline"
+            className="w-full rounded-xl"
+            onClick={() => {
+              signOut();
+              navigate({ to: "/" });
+            }}
+          >
+            <LogOut /> Log out
+          </Button>
+        </section>
+
+        {/* 2nd Place: Premium Plans Section (Trial Plan shown here until completed, then auto-hidden) */}
+        <section className="space-y-3 rounded-3xl border bg-card p-5 shadow-soft">
+          <div className="flex items-center justify-between">
+            <h2 className="flex items-center gap-2 font-display text-lg font-bold">
+              <Crown className="size-5 text-amber-500" /> Premium Plans
+            </h2>
+            {trialCompleted && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+                <EyeOff className="size-3" /> Trial Hidden
+              </span>
+            )}
+          </div>
+
+          <div className="space-y-2.5">
+            {/* Trial Plan Card — Auto-hides once completed */}
+            {showTrialInPremiumSection && (
+              <button
+                type="button"
+                onClick={() => setSelectedPlanPreview("trial")}
+                className={cn(
+                  "flex w-full items-center justify-between rounded-2xl border p-3.5 text-left transition-all",
+                  selectedPlanPreview === "trial"
+                    ? "border-emerald-500 bg-emerald-50/70"
+                    : "bg-background hover:border-emerald-400",
+                )}
+              >
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <Sparkles className="size-4 text-emerald-600" />
+                    <span className="font-bold text-sm">Free Trial Plan</span>
+                  </div>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Valid for {pricing.trialDays} days · Auto-hides after completion
+                  </p>
+                </div>
+                <span className="rounded-xl bg-emerald-600 px-3 py-1 text-xs font-bold text-white">
+                  FREE
+                </span>
+              </button>
+            )}
+
+            {/* Monthly Plan */}
+            <button
+              type="button"
+              onClick={() => setSelectedPlanPreview("monthly")}
+              className={cn(
+                "flex w-full items-center justify-between rounded-2xl border p-3.5 text-left transition-all",
+                selectedPlanPreview === "monthly" ? "border-primary bg-primary/5" : "bg-background",
+              )}
+            >
+              <div>
+                <p className="font-bold text-sm">Monthly Plan</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">Valid for {pricing.monthlyDays} days</p>
+              </div>
+              <span className="font-display text-lg font-bold text-primary">₹{pricing.monthlyPrice}</span>
+            </button>
+
+            {/* Quarterly Plan */}
+            <button
+              type="button"
+              onClick={() => setSelectedPlanPreview("quarterly")}
+              className={cn(
+                "flex w-full items-center justify-between rounded-2xl border p-3.5 text-left transition-all",
+                selectedPlanPreview === "quarterly" ? "border-primary bg-primary/5" : "bg-background",
+              )}
+            >
+              <div>
+                <p className="font-bold text-sm">Quarterly Plan</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">Valid for {pricing.quarterlyDays} days</p>
+              </div>
+              <span className="font-display text-lg font-bold text-primary">₹{pricing.quarterlyPrice}</span>
+            </button>
+
+            {/* Yearly Plan */}
+            <button
+              type="button"
+              onClick={() => setSelectedPlanPreview("yearly")}
+              className={cn(
+                "flex w-full items-center justify-between rounded-2xl border p-3.5 text-left transition-all",
+                selectedPlanPreview === "yearly" ? "border-primary bg-primary/5" : "bg-background",
+              )}
+            >
+              <div>
+                <p className="font-bold text-sm">Yearly Plan</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">Valid for {pricing.yearlyDays} days</p>
+              </div>
+              <span className="font-display text-lg font-bold text-primary">₹{pricing.yearlyPrice}</span>
+            </button>
+          </div>
+
+          {/* Helper toggle to test Trial completion -> automatic hiding */}
+          <div className="flex items-center justify-between rounded-2xl bg-muted/70 px-3.5 py-2.5 text-xs">
+            <span className="text-muted-foreground">Trial Plan Complete / Expired:</span>
+            <button
+              type="button"
+              onClick={() => {
+                const next = !trialCompleted;
+                setTrialCompleted(next);
+                toast.message(
+                  next
+                    ? "Trial plan complete ho gaya — Premium Plans section se automatically hide ho gaya."
+                    : "Trial plan reset — Premium Plans section mein dobara dikh raha hai.",
+                );
+              }}
+              className="font-semibold text-primary underline"
+            >
+              {trialCompleted ? "Reset Trial (Show)" : "Mark Trial Complete (Auto-Hide)"}
+            </button>
+          </div>
+        </section>
+
+        {/* Bottom Section: Owner / Admin Settings Lock & Phase 1 Admin Panel */}
+        {!isOwnerUnlocked && !showAdminLockModal && (
+          <button
+            type="button"
+            onClick={() => setShowAdminLockModal(true)}
+            className="flex w-full items-center gap-3 rounded-2xl border border-dashed bg-card p-3.5 text-sm font-semibold text-muted-foreground shadow-soft transition-all hover:border-primary hover:text-primary"
+          >
+            <UserCog className="size-5 text-primary" /> Owner / Admin settings
+            <ChevronRight className="ml-auto size-4" />
+          </button>
+        )}
+
+        {!isOwnerUnlocked && showAdminLockModal && (
+          <form onSubmit={handleAdminAccess} className="space-y-3 rounded-3xl border-2 border-primary bg-card p-4 shadow-soft">
+            <div className="flex items-center justify-between">
+              <p className="flex items-center gap-2 font-display text-sm font-bold text-primary">
+                <Lock className="size-4" /> Owner Authentication Required
+              </p>
+              <button
+                type="button"
+                onClick={() => setShowAdminLockModal(false)}
+                className="text-xs text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Enter your password or use fingerprint sensor to open Owner Admin Panel.
+            </p>
+            <div className="flex gap-2">
+              <Input
+                type="password"
+                value={adminPasswordInput}
+                onChange={(e) => setAdminPasswordInput(e.target.value)}
+                placeholder="Enter password"
+                className="h-10 rounded-xl"
+                autoFocus
+              />
+              <Button type="submit" variant="brand" className="h-10 rounded-xl">
+                Verify
+              </Button>
+            </div>
+            {bioOk && (
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full rounded-xl text-xs"
+                onClick={triggerOwnerBiometric}
+              >
+                <Fingerprint className="mr-1.5 size-4 text-primary" /> Unlock with Fingerprint Sensor
+              </Button>
+            )}
+          </form>
+        )}
+
+        {/* UNLOCKED OWNER ADMIN PANEL — PHASE 1 (1 to 5) */}
+        {isOwnerUnlocked && (
+          <div className="space-y-4 rounded-3xl border-2 border-primary/30 bg-card p-4 shadow-soft">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div>
+                <h2 className="font-display text-lg font-bold text-primary">Owner Admin Panel</h2>
+                <p className="text-[11px] text-muted-foreground">AL MURTAJIZ — Phase 1 (1 to 5)</p>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 rounded-xl text-xs"
+                onClick={() => setIsOwnerUnlocked(false)}
+              >
+                <Lock className="mr-1 size-3.5" /> Lock
+              </Button>
+            </div>
+
+            {/* Top 4 Summary Cards */}
+            <div className="grid grid-cols-2 gap-2.5">
+              <div className="rounded-2xl border bg-background p-3">
+                <p className="text-[11px] font-medium text-muted-foreground">Total Drivers</p>
+                <p className="mt-0.5 font-display text-xl font-bold">{stats.totalDrivers}</p>
+              </div>
+              <div className="rounded-2xl border bg-background p-3">
+                <p className="text-[11px] font-medium text-muted-foreground">Active Members</p>
+                <p className="mt-0.5 font-display text-xl font-bold text-primary">{stats.activeMembers}</p>
+              </div>
+              <div className="rounded-2xl border bg-background p-3">
+                <p className="text-[11px] font-medium text-muted-foreground">Premium Members</p>
+                <p className="mt-0.5 font-display text-xl font-bold text-amber-600">{stats.premiumMembers}</p>
+              </div>
+              <div className="rounded-2xl border bg-background p-3">
+                <p className="text-[11px] font-medium text-muted-foreground">Total Payment</p>
+                <p className="mt-0.5 flex items-center font-display text-xl font-bold text-emerald-600">
+                  <IndianRupee className="size-4" />
+                  {stats.totalPayment.toLocaleString("en-IN")}
+                </p>
+              </div>
+            </div>
+
+            {/* Numbered Phase 1 Navigation (1 to 5) */}
+            <div className="flex gap-1.5 overflow-x-auto pb-1">
+              {phase1Menu.map((item) => {
+                const isSelected = activeTab === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setActiveTab(item.id)}
+                    className={cn(
+                      "flex shrink-0 items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold transition-all",
+                      isSelected
+                        ? "border-primary bg-primary text-primary-foreground shadow-sm"
+                        : "bg-background text-foreground hover:border-primary/50",
+                    )}
+                  >
+                    {item.icon}
+                    <span>{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* 1. DASHBOARD */}
+            {activeTab === 1 && (
+              <section className="space-y-3 rounded-2xl border bg-background p-3.5">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-display text-base font-bold">1. Dashboard Overview</h3>
+                  <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+                    Phase 1
+                  </span>
+                </div>
+                <div className="space-y-2 rounded-xl bg-muted/60 p-3 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Registered Drivers:</span>
+                    <span className="font-semibold">{stats.totalDrivers}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Active Members:</span>
+                    <span className="font-semibold">{stats.activeMembers}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Paid / Active Premium Drivers:</span>
+                    <span className="font-semibold">{stats.premiumMembers}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Total Successful Collection:</span>
+                    <span className="font-bold text-emerald-700">₹{stats.totalPayment.toLocaleString("en-IN")}</span>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {/* 2. MANAGE DRIVERS */}
+            {activeTab === 2 && (
+              <section className="space-y-3 rounded-2xl border bg-background p-3.5">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-display text-base font-bold">2. Manage Drivers</h3>
+                  <span className="text-xs font-semibold text-muted-foreground">{filteredDrivers.length} records</span>
+                </div>
+
+                <div className="relative">
+                  <Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" />
+                  <Input
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Naam, mobile ya address search karein..."
+                    className="h-9 rounded-xl pl-9 text-xs"
+                  />
+                </div>
+
+                <div className="space-y-2.5">
+                  {filteredDrivers.map((driver) => (
+                    <div key={driver.id} className="space-y-2 rounded-xl border bg-card p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2.5">
+                          {driver.photo ? (
+                            <img
+                              src={driver.photo}
+                              alt={driver.name}
+                              className="size-10 rounded-full border object-cover"
+                            />
+                          ) : (
+                            <div className="flex size-10 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
+                              {driver.name.slice(0, 2).toUpperCase()}
+                            </div>
+                          )}
+                          <div>
+                            <p className="text-sm font-semibold leading-tight">{driver.name}</p>
+                            <p className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground">
+                              <Phone className="size-3" /> +91 {driver.mobile}
+                            </p>
+                          </div>
+                        </div>
+
+                        <span
+                          className={cn(
+                            "rounded-full px-2 py-0.5 text-[10px] font-bold uppercase",
+                            driver.status === "approved" && "bg-emerald-100 text-emerald-700",
+                            driver.status === "pending" && "bg-amber-100 text-amber-700",
+                            driver.status === "rejected" && "bg-orange-100 text-orange-700",
+                            driver.status === "blocked" && "bg-red-100 text-red-700",
+                          )}
+                        >
+                          {driver.status}
+                        </span>
+                      </div>
+
+                      <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                        <MapPin className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                        <span>{driver.address}</span>
+                      </p>
+
+                      <div className="grid grid-cols-3 gap-1.5 pt-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="brand"
+                          className="h-8 rounded-lg px-2 text-[11px]"
+                          disabled={driver.status === "approved"}
+                          onClick={() => handleDriverAction(driver.id, "approved")}
+                        >
+                          <CheckCircle2 className="mr-1 size-3" /> Approve
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-8 rounded-lg border-orange-200 px-2 text-[11px] text-orange-700 hover:bg-orange-50"
+                          disabled={driver.status === "rejected"}
+                          onClick={() => handleDriverAction(driver.id, "rejected")}
+                        >
+                          <XCircle className="mr-1 size-3" /> Reject
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-8 rounded-lg border-red-200 px-2 text-[11px] text-red-600 hover:bg-red-50"
+                          disabled={driver.status === "blocked"}
+                          onClick={() => handleDriverAction(driver.id, "blocked")}
+                        >
+                          <Ban className="mr-1 size-3" /> Block
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {/* 3. PREMIUM PLANS (1st Place for Trial Plan Settings + Price/Validity Edit) */}
+            {activeTab === 3 && (
+              <form onSubmit={handlePricingSubmit} className="space-y-3 rounded-2xl border bg-background p-3.5">
+                <h3 className="font-display text-base font-bold">3. Premium & Trial Plans</h3>
+
+                {/* Trial Plan Box in Admin Panel */}
+                <div className="space-y-2.5 rounded-xl border border-emerald-200 bg-emerald-50/40 p-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase text-emerald-700">Free Trial Plan</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-muted-foreground">Show</span>
+                      <Switch
+                        checked={pricing.trialEnabled}
+                        onCheckedChange={(checked) => setPricing({ ...pricing, trialEnabled: checked })}
+                        aria-label="Enable Trial Plan"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="text-[11px] text-muted-foreground">Price (₹)</label>
+                      <Input type="number" value={0} disabled className="mt-1 h-9 rounded-lg bg-muted text-xs" />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-muted-foreground">Trial Validity (Days)</label>
+                      <Input
+                        type="number"
+                        value={pricing.trialDays}
+                        onChange={(e) => setPricing({ ...pricing, trialDays: Number(e.target.value) })}
+                        className="mt-1 h-9 rounded-lg bg-card text-xs"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground">
+                    Trial complete/expire hote hi Premium Plans section se automatically hide ho jayega.
+                  </p>
+                </div>
+
+                {/* Monthly Plan */}
+                <div className="grid grid-cols-2 gap-2.5 rounded-xl border bg-card p-2.5">
+                  <div className="col-span-2 text-[11px] font-bold uppercase text-primary">Monthly Plan</div>
+                  <div>
+                    <label className="text-[11px] text-muted-foreground">Price (₹)</label>
+                    <Input
+                      type="number"
+                      value={pricing.monthlyPrice}
+                      onChange={(e) => setPricing({ ...pricing, monthlyPrice: Number(e.target.value) })}
+                      className="mt-1 h-9 rounded-lg text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-muted-foreground">Validity (Days)</label>
+                    <Input
+                      type="number"
+                      value={pricing.monthlyDays}
+                      onChange={(e) => setPricing({ ...pricing, monthlyDays: Number(e.target.value) })}
+                      className="mt-1 h-9 rounded-lg text-xs"
+                    />
+                  </div>
+                </div>
+
+                {/* Quarterly Plan */}
+                <div className="grid grid-cols-2 gap-2.5 rounded-xl border bg-card p-2.5">
+                  <div className="col-span-2 text-[11px] font-bold uppercase text-primary">Quarterly Plan</div>
+                  <div>
+                    <label className="text-[11px] text-muted-foreground">Price (₹)</label>
+                    <Input
+                      type="number"
+                      value={pricing.quarterlyPrice}
+                      onChange={(e) => setPricing({ ...pricing, quarterlyPrice: Number(e.target.value) })}
+                      className="mt-1 h-9 rounded-lg text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-muted-foreground">Validity (Days)</label>
+                    <Input
+                      type="number"
+                      value={pricing.quarterlyDays}
+                      onChange={(e) => setPricing({ ...pricing, quarterlyDays: Number(e.target.value) })}
+                      className="mt-1 h-9 rounded-lg text-xs"
+                    />
+                  </div>
+                </div>
+
+                {/* Yearly Plan */}
+                <div className="grid grid-cols-2 gap-2.5 rounded-xl border bg-card p-2.5">
+                  <div className="col-span-2 text-[11px] font-bold uppercase text-primary">Yearly Plan</div>
+                  <div>
+                    <label className="text-[11px] text-muted-foreground">Price (₹)</label>
+                    <Input
+                      type="number"
+                      value={pricing.yearlyPrice}
+                      onChange={(e) => setPricing({ ...pricing, yearlyPrice: Number(e.target.value) })}
+                      className="mt-1 h-9 rounded-lg text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-muted-foreground">Validity (Days)</label>
+                    <Input
+                      type="number"
+                      value={pricing.yearlyDays}
+                      onChange={(e) => setPricing({ ...pricing, yearlyDays: Number(e.target.value) })}
+                      className="mt-1 h-9 rounded-lg text-xs"
+                    />
+                  </div>
+                </div>
+
+                <Button type="submit" variant="brand" className="w-full rounded-xl text-xs">
+                  Save Trial & Premium Plans
+                </Button>
+              </form>
+            )}
+
+            {/* 4. PAYMENT MANAGEMENT */}
+            {activeTab === 4 && (
+              <section className="space-y-3 rounded-2xl border bg-background p-3.5">
+                <h3 className="font-display text-base font-bold">4. Payment Management</h3>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {(["all", "success", "pending", "failed", "refunded"] as const).map((st) => (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => setPaymentFilter(st)}
+                      className={cn(
+                        "rounded-full border px-2.5 py-1 text-[11px] font-semibold capitalize",
+                        paymentFilter === st
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "bg-card text-muted-foreground",
+                      )}
+                    >
+                      {st}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="space-y-2">
+                  {filteredPayments.map((pay) => (
+                    <div key={pay.id} className="space-y-1.5 rounded-xl border bg-card p-3 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold">{pay.driverName}</span>
+                        <span className="font-display text-sm font-bold text-primary">₹{pay.amount}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                        <span>
+                          {pay.id} · {pay.planName}
+                        </span>
+                        <span>{pay.date}</span>
+                      </div>
+                      <div className="flex items-center justify-between pt-1">
+                        <span
+                          className={cn(
+                            "rounded-full px-2 py-0.5 text-[10px] font-bold uppercase",
+                            pay.status === "success" && "bg-emerald-100 text-emerald-700",
+                            pay.status === "pending" && "bg-amber-100 text-amber-700",
+                            pay.status === "failed" && "bg-red-100 text-red-700",
+                            pay.status === "refunded" && "bg-slate-200 text-slate-700",
+                          )}
+                        >
+                          {pay.status}
+                        </span>
+
+                        {pay.status !== "success" && (
+                          <div className="flex gap-1.5">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="brand"
+                              className="h-7 rounded-lg px-2 text-[11px]"
+                              onClick={() => handlePaymentAction(pay.id, "success")}
+                            >
+                              Mark Success
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 rounded-lg px-2 text-[11px]"
+                              onClick={() => handlePaymentAction(pay.id, "refunded")}
+                            >
+                              Refund
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {/* 5. MANAGE SUBSCRIPTIONS */}
+            {activeTab === 5 && (
+              <section className="space-y-3 rounded-2xl border bg-background p-3.5">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-display text-base font-bold">5. Manage Subscriptions</h3>
+                  <Activity className="size-4 text-primary" />
+                </div>
+
+                <div className="space-y-2">
+                  {drivers.map((d) => (
+                    <div key={d.id} className="flex items-center justify-between rounded-xl border bg-card p-2.5 text-xs">
+                      <div>
+                        <p className="font-bold">{d.name}</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          +91 {d.mobile} · <span className="font-medium text-foreground">{d.planName}</span>
+                        </p>
+                        <p className="mt-0.5 text-[10px] text-muted-foreground">
+                          {d.expiresOn ? `Expiry: ${d.expiresOn}` : "No active subscription"}
+                        </p>
+                      </div>
+
+                      <span
+                        className={cn(
+                          "rounded-full px-2 py-0.5 text-[10px] font-bold uppercase",
+                          d.planStatus === "active" && "bg-emerald-100 text-emerald-700",
+                          d.planStatus === "trial" && "bg-blue-100 text-blue-700",
+                          d.planStatus === "expired" && "bg-amber-100 text-amber-800",
+                          d.planStatus === "none" && "bg-muted text-muted-foreground",
+                        )}
+                      >
+                        {d.planStatus === "expired" ? "Renewal Due" : d.planStatus}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+          </div>
+        )}
+      </main>
+    </MobileShell>
+  );
+}
